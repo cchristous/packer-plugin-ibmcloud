@@ -334,3 +334,128 @@ func TestWaitForResourceReadyFatalErrorFailsImmediately(t *testing.T) {
 		t.Errorf("expected exactly one poll for a fatal error, got %d", got)
 	}
 }
+
+// retryTransient backs the one-shot create/mutating calls. These tests pin the
+// same transient-vs-fatal contract used by the poll loops (TestIsTransientPollError):
+// retry 5xx/429/network blips, fail fast on 4xx, and cap the retries.
+
+func TestRetryTransientRetriesThenSucceeds(t *testing.T) {
+	state := new(multistep.BasicStateBag)
+	state.Put("ui", packer.TestUi(t))
+	client := IBMCloudClient{pollInterval: time.Millisecond}
+
+	var calls int
+	err := client.retryTransient(state, "creating a test resource", func() (*core.DetailedResponse, error) {
+		calls++
+		if calls <= 2 {
+			return &core.DetailedResponse{StatusCode: http.StatusBadGateway}, errors.New("bad gateway")
+		}
+		return &core.DetailedResponse{StatusCode: http.StatusCreated}, nil
+	})
+	if err != nil {
+		t.Fatalf("retryTransient returned error after transient failures: %s", err)
+	}
+	if calls != 3 {
+		t.Errorf("expected 3 calls (2 transient + 1 success), got %d", calls)
+	}
+}
+
+func TestRetryTransientFatalFailsImmediately(t *testing.T) {
+	state := new(multistep.BasicStateBag)
+	state.Put("ui", packer.TestUi(t))
+	client := IBMCloudClient{pollInterval: time.Millisecond}
+
+	var calls int
+	err := client.retryTransient(state, "creating a test resource", func() (*core.DetailedResponse, error) {
+		calls++
+		return &core.DetailedResponse{StatusCode: http.StatusNotFound}, errors.New("not found")
+	})
+	if err == nil {
+		t.Fatal("expected a fatal error to be returned")
+	}
+	if calls != 1 {
+		t.Errorf("expected exactly one call for a fatal error, got %d", calls)
+	}
+}
+
+func TestRetryTransientGivesUpAfterCap(t *testing.T) {
+	state := new(multistep.BasicStateBag)
+	state.Put("ui", packer.TestUi(t))
+	client := IBMCloudClient{pollInterval: time.Millisecond}
+
+	var calls int
+	err := client.retryTransient(state, "creating a test resource", func() (*core.DetailedResponse, error) {
+		calls++
+		return &core.DetailedResponse{StatusCode: http.StatusBadGateway}, errors.New("bad gateway")
+	})
+	if err == nil {
+		t.Fatal("expected an error after exceeding the transient retry cap")
+	}
+	// One initial attempt plus maxConsecutiveTransientPollFailures retries.
+	if want := maxConsecutiveTransientPollFailures + 1; calls != want {
+		t.Errorf("expected %d calls (initial + %d retries), got %d", want, maxConsecutiveTransientPollFailures, calls)
+	}
+}
+
+// TestCreateSecurityGroup* exercise retryTransient through a real create call
+// against an httptest server, proving the DetailedResponse/error captured from
+// the SDK is classified correctly end to end.
+
+func TestCreateSecurityGroupToleratesTransientFailures(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if atomic.AddInt32(&calls, 1) <= 2 {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"sg-1","name":"sg"}`))
+	}))
+	defer srv.Close()
+
+	state := new(multistep.BasicStateBag)
+	state.Put("ui", packer.TestUi(t))
+	state.Put("vpcService", newTestVpcService(t, srv.URL))
+	client := IBMCloudClient{pollInterval: time.Millisecond}
+
+	sg, err := client.createSecurityGroup(state, vpcv1.CreateSecurityGroupOptions{
+		VPC: &vpcv1.VPCIdentityByID{ID: &[]string{"vpc-1"}[0]},
+	})
+	if err != nil {
+		t.Fatalf("createSecurityGroup returned error after transient failures: %s", err)
+	}
+	if sg == nil || *sg.ID != "sg-1" {
+		t.Fatalf("expected security group sg-1, got %+v", sg)
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Errorf("expected 3 calls (2 transient + 1 success), got %d", got)
+	}
+}
+
+func TestCreateSecurityGroupFatalFailsImmediately(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	state := new(multistep.BasicStateBag)
+	state.Put("ui", packer.TestUi(t))
+	state.Put("vpcService", newTestVpcService(t, srv.URL))
+	client := IBMCloudClient{pollInterval: time.Millisecond}
+
+	_, err := client.createSecurityGroup(state, vpcv1.CreateSecurityGroupOptions{
+		VPC: &vpcv1.VPCIdentityByID{ID: &[]string{"vpc-1"}[0]},
+	})
+	if err == nil {
+		t.Fatal("expected a fatal error for a 400 response")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("expected exactly one call for a fatal error, got %d", got)
+	}
+}

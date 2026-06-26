@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/IBM/go-sdk-core/v5/core"
 	"github.com/IBM/vpc-go-sdk/vpcv1"
 	"github.com/hashicorp/packer-plugin-sdk/multistep"
 	"github.com/hashicorp/packer-plugin-sdk/packer"
@@ -14,6 +15,7 @@ import (
 type stepCreateInstance struct{}
 
 func (step *stepCreateInstance) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+	client := state.Get("client").(*IBMCloudClient)
 	config := state.Get("config").(Config)
 	ui := state.Get("ui").(packer.Ui)
 
@@ -119,7 +121,13 @@ func (step *stepCreateInstance) Run(_ context.Context, state multistep.StateBag)
 		createInstanceOptions := vpcService.NewCreateInstanceOptions(
 			instancePrototypeModel,
 		)
-		instanceData, _, err := vpcService.CreateInstance(createInstanceOptions)
+		var instanceData *vpcv1.Instance
+		err := client.retryTransient(state, "creating the instance", func() (*core.DetailedResponse, error) {
+			var resp *core.DetailedResponse
+			var e error
+			instanceData, resp, e = vpcService.CreateInstance(createInstanceOptions)
+			return resp, e
+		})
 		// End
 		if err != nil {
 			err := fmt.Errorf("[ERROR] Error creating the instance: %s", err)
@@ -187,7 +195,13 @@ func (step *stepCreateInstance) Run(_ context.Context, state multistep.StateBag)
 		createInstanceOptions := vpcService.NewCreateInstanceOptions(
 			instancePrototypeModel,
 		)
-		instanceData, _, err := vpcService.CreateInstance(createInstanceOptions)
+		var instanceData *vpcv1.Instance
+		err := client.retryTransient(state, "creating the instance", func() (*core.DetailedResponse, error) {
+			var resp *core.DetailedResponse
+			var e error
+			instanceData, resp, e = vpcService.CreateInstance(createInstanceOptions)
+			return resp, e
+		})
 		// End
 		if err != nil {
 			err := fmt.Errorf("[ERROR] Error creating the instance: %s", err)
@@ -254,7 +268,13 @@ func (step *stepCreateInstance) Run(_ context.Context, state multistep.StateBag)
 		createInstanceOptions := vpcService.NewCreateInstanceOptions(
 			instancePrototypeModel,
 		)
-		instanceData, _, err := vpcService.CreateInstance(createInstanceOptions)
+		var instanceData *vpcv1.Instance
+		err := client.retryTransient(state, "creating the instance", func() (*core.DetailedResponse, error) {
+			var resp *core.DetailedResponse
+			var e error
+			instanceData, resp, e = vpcService.CreateInstance(createInstanceOptions)
+			return resp, e
+		})
 		// End
 		if err != nil {
 			err := fmt.Errorf("[ERROR] Error creating the instance: %s", err)
@@ -313,7 +333,13 @@ func (step *stepCreateInstance) Run(_ context.Context, state multistep.StateBag)
 		createInstanceOptions := vpcService.NewCreateInstanceOptions(
 			instancePrototypeModel,
 		)
-		instanceData, _, err := vpcService.CreateInstance(createInstanceOptions)
+		var instanceData *vpcv1.Instance
+		err := client.retryTransient(state, "creating the instance", func() (*core.DetailedResponse, error) {
+			var resp *core.DetailedResponse
+			var e error
+			instanceData, resp, e = vpcService.CreateInstance(createInstanceOptions)
+			return resp, e
+		})
 		// End
 		if err != nil {
 			err := fmt.Errorf("[ERROR] Error creating the instance: %s", err)

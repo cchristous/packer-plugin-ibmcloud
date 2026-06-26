@@ -72,6 +72,47 @@ func classifyPollError(resp *core.DetailedResponse, err error, wrapped error) er
 	return wrapped
 }
 
+// retryTransient runs a one-shot create/mutating VPC API call, retrying it when
+// it fails with a transient error (a 5xx/429 response or a network-level blip)
+// up to maxConsecutiveTransientPollFailures times before giving up. Fatal errors
+// (e.g. 4xx) return immediately on the first occurrence so genuinely bad requests
+// still fail fast. It shares the transient/fatal classifier (isTransientPollError)
+// with the poll loops so both paths treat the same errors the same way.
+//
+// op performs the API call and returns its DetailedResponse and error; the caller
+// captures the typed result (key, instance, ...) via closure. retryTransient
+// returns the underlying API error unchanged, so callers keep their existing
+// error wrapping and "error" state-bag handling.
+func (client IBMCloudClient) retryTransient(state multistep.StateBag, action string, op func() (*core.DetailedResponse, error)) error {
+	ui := state.Get("ui").(packer.Ui)
+
+	interval := client.pollInterval
+	if interval <= 0 {
+		interval = defaultPollInterval
+	}
+
+	var err error
+	for attempt := 0; ; attempt++ {
+		var resp *core.DetailedResponse
+		resp, err = op()
+		if err == nil {
+			return nil
+		}
+		if !isTransientPollError(resp, err) {
+			return err
+		}
+		if attempt >= maxConsecutiveTransientPollFailures {
+			log.Printf("giving up %s after %d consecutive transient errors: %s", action, attempt+1, err)
+			return err
+		}
+		ui.Say(fmt.Sprintf("Transient error %s (%d/%d), retrying: %s",
+			action, attempt+1, maxConsecutiveTransientPollFailures, err))
+		log.Printf("transient error %s (attempt %d/%d): %s",
+			action, attempt+1, maxConsecutiveTransientPollFailures, err)
+		time.Sleep(interval)
+	}
+}
+
 // sleepOrDone waits interval between polls and then reports whether the poll
 // goroutine should stop because its parent has already returned (done closed).
 func sleepOrDone(interval time.Duration, done <-chan struct{}) (stop bool) {
@@ -293,7 +334,13 @@ func (client IBMCloudClient) manageInstance(resourceID string, action string, st
 	options := &vpcv1.CreateInstanceActionOptions{}
 	options.SetInstanceID(resourceID)
 	options.SetType(action)
-	response, _, err := vpcService.CreateInstanceAction(options)
+	var response *vpcv1.InstanceAction
+	err := client.retryTransient(state, fmt.Sprintf("performing %s action over instance", action), func() (*core.DetailedResponse, error) {
+		var resp *core.DetailedResponse
+		var e error
+		response, resp, e = vpcService.CreateInstanceAction(options)
+		return resp, e
+	})
 	if err != nil {
 		err := fmt.Errorf("[ERROR] Failed to perform %s action over instance. Error: %s", action, err)
 		ui.Error(err.Error())
@@ -354,7 +401,13 @@ func (client IBMCloudClient) createFloatingIP(state multistep.StateBag) (*vpcv1.
 			ID: &instanceResourceGroupID,
 		},
 	})
-	floatingIP, _, err := vpcService.CreateFloatingIP(options)
+	var floatingIP *vpcv1.FloatingIP
+	err := client.retryTransient(state, "creating Floating IP", func() (*core.DetailedResponse, error) {
+		var resp *core.DetailedResponse
+		var e error
+		floatingIP, resp, e = vpcService.CreateFloatingIP(options)
+		return resp, e
+	})
 	if err != nil {
 		err := fmt.Errorf("[ERROR] Failed creating Floating IP Request. Error: %s", err)
 		ui.Error(err.Error())
@@ -457,7 +510,13 @@ func (client IBMCloudClient) createSSHKeyVPC(state multistep.StateBag) (*vpcv1.K
 		vpcService = state.Get("vpcService").(*vpcv1.VpcV1)
 	}
 
-	key, _, err := vpcService.CreateKey(options)
+	var key *vpcv1.Key
+	err = client.retryTransient(state, "creating the SSH Key for VPC", func() (*core.DetailedResponse, error) {
+		var resp *core.DetailedResponse
+		var e error
+		key, resp, e = vpcService.CreateKey(options)
+		return resp, e
+	})
 	if err != nil {
 		err := fmt.Errorf("[ERROR] Error sending the HTTP request that creates the SSH Key for VPC. Error: %s", err)
 		ui.Error(err.Error())
@@ -491,7 +550,13 @@ func (client IBMCloudClient) createSecurityGroup(state multistep.StateBag, secur
 		vpcService = state.Get("vpcService").(*vpcv1.VpcV1)
 	}
 
-	securityGroup, _, err := vpcService.CreateSecurityGroup(&securityGroupData)
+	var securityGroup *vpcv1.SecurityGroup
+	err := client.retryTransient(state, "creating the Security Group", func() (*core.DetailedResponse, error) {
+		var resp *core.DetailedResponse
+		var e error
+		securityGroup, resp, e = vpcService.CreateSecurityGroup(&securityGroupData)
+		return resp, e
+	})
 	if err != nil {
 		err := fmt.Errorf("[ERROR] Error creating the Security Group. Error: %s", err)
 		ui.Error(err.Error())
@@ -509,15 +574,20 @@ func (client IBMCloudClient) createRule(rule vpcv1.CreateSecurityGroupRuleOption
 		vpcService = state.Get("vpcService").(*vpcv1.VpcV1)
 	}
 
-	securityGroupRuleIntf, _, err := vpcService.CreateSecurityGroupRule(&rule)
-	securityGroupRule := securityGroupRuleIntf.(*vpcv1.SecurityGroupRuleSecurityGroupRuleProtocolTcpudp)
-
+	var securityGroupRuleIntf vpcv1.SecurityGroupRuleIntf
+	err := client.retryTransient(state, "creating a Security Group's rule", func() (*core.DetailedResponse, error) {
+		var resp *core.DetailedResponse
+		var e error
+		securityGroupRuleIntf, resp, e = vpcService.CreateSecurityGroupRule(&rule)
+		return resp, e
+	})
 	if err != nil {
 		err := fmt.Errorf("[ERROR] Error sending the HTTP request that creates a Security Group's rule. Error: %s", err)
 		ui.Error(err.Error())
 		log.Println(err.Error())
 		return nil, err
 	}
+	securityGroupRule := securityGroupRuleIntf.(*vpcv1.SecurityGroupRuleSecurityGroupRuleProtocolTcpudp)
 	return securityGroupRule, nil
 }
 
@@ -531,7 +601,13 @@ func (client IBMCloudClient) addNetworkInterfaceToSecurityGroup(securityGroupID 
 		securityGroupID,
 		networkInterfaceID,
 	)
-	securityGroupTargetReferenceIntf, _, err := vpcService.CreateSecurityGroupTargetBinding(options)
+	var securityGroupTargetReferenceIntf vpcv1.SecurityGroupTargetReferenceIntf
+	err := client.retryTransient(state, "adding the VSI's network interface to the Security Group", func() (*core.DetailedResponse, error) {
+		var resp *core.DetailedResponse
+		var e error
+		securityGroupTargetReferenceIntf, resp, e = vpcService.CreateSecurityGroupTargetBinding(options)
+		return resp, e
+	})
 	if err != nil {
 		err := fmt.Errorf("[ERROR] Error sending the HTTP request that Add the VSI's network interface to the Security Group. Error: %s", err)
 		ui.Error(err.Error())

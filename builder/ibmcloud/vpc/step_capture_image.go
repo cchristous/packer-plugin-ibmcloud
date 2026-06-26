@@ -88,7 +88,13 @@ func (s *stepCaptureImage) Run(_ context.Context, state multistep.StateBag) mult
 
 	options.SetImagePrototype(imagePrototype)
 
-	imageData, _, err := vpcService.CreateImage(options)
+	var imageData *vpcv1.Image
+	err = client.retryTransient(state, "creating the image", func() (*core.DetailedResponse, error) {
+		var resp *core.DetailedResponse
+		var e error
+		imageData, resp, e = vpcService.CreateImage(options)
+		return resp, e
+	})
 
 	if err != nil {
 		err := fmt.Errorf("[ERROR] Error sending the HTTP request that creates the image. Error: %s", err)

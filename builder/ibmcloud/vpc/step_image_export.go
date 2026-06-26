@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/IBM/go-sdk-core/v5/core"
 	"github.com/IBM/vpc-go-sdk/vpcv1"
 	"github.com/hashicorp/packer-plugin-sdk/multistep"
 	"github.com/hashicorp/packer-plugin-sdk/packer"
@@ -14,6 +15,7 @@ import (
 type StepImageExport struct{}
 
 func (step *StepImageExport) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+	client := state.Get("client").(*IBMCloudClient)
 	config := state.Get("config").(Config)
 	ui := state.Get("ui").(packer.Ui)
 
@@ -50,7 +52,13 @@ func (step *StepImageExport) Run(_ context.Context, state multistep.StateBag) mu
 	createImageExportJobOptions.SetFormat(format)
 	createImageExportJobOptions.SetName(imageExportJobName)
 
-	imageExportJob, _, err := vpcService.CreateImageExportJob(createImageExportJobOptions)
+	var imageExportJob *vpcv1.ImageExportJob
+	err := client.retryTransient(state, "creating the image export job", func() (*core.DetailedResponse, error) {
+		var resp *core.DetailedResponse
+		var e error
+		imageExportJob, resp, e = vpcService.CreateImageExportJob(createImageExportJobOptions)
+		return resp, e
+	})
 	if err != nil {
 		err := fmt.Errorf("[ERROR] Error creating image export job: %s", err)
 		state.Put("error", err)
