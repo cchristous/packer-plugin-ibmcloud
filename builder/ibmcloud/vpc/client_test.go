@@ -391,9 +391,57 @@ func TestRetryTransientGivesUpAfterCap(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error after exceeding the transient retry cap")
 	}
+	if !strings.Contains(err.Error(), "transient") {
+		t.Errorf("give-up error should mention transient failures, got: %s", err)
+	}
 	// One initial attempt plus maxConsecutiveTransientPollFailures retries.
 	if want := maxConsecutiveTransientPollFailures + 1; calls != want {
 		t.Errorf("expected %d calls (initial + %d retries), got %d", want, maxConsecutiveTransientPollFailures, calls)
+	}
+}
+
+func TestRetryTransientRetriesNetworkErrorWithNilResp(t *testing.T) {
+	state := new(multistep.BasicStateBag)
+	state.Put("ui", packer.TestUi(t))
+	client := IBMCloudClient{pollInterval: time.Millisecond}
+
+	var calls int
+	err := client.retryTransient(state, "creating a test resource", func() (*core.DetailedResponse, error) {
+		calls++
+		if calls == 1 {
+			// A request that never reached the server (no DetailedResponse) is a
+			// network-level blip and must be retried.
+			return nil, errors.New("connection reset by peer")
+		}
+		return &core.DetailedResponse{StatusCode: http.StatusCreated}, nil
+	})
+	if err != nil {
+		t.Fatalf("retryTransient returned error after a network blip: %s", err)
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 calls (1 network blip + 1 success), got %d", calls)
+	}
+}
+
+func TestRetryTransientFatalMidStreakShortCircuits(t *testing.T) {
+	state := new(multistep.BasicStateBag)
+	state.Put("ui", packer.TestUi(t))
+	client := IBMCloudClient{pollInterval: time.Millisecond}
+
+	var calls int
+	err := client.retryTransient(state, "creating a test resource", func() (*core.DetailedResponse, error) {
+		calls++
+		if calls <= 2 {
+			return &core.DetailedResponse{StatusCode: http.StatusBadGateway}, errors.New("bad gateway")
+		}
+		return &core.DetailedResponse{StatusCode: http.StatusBadRequest}, errors.New("bad request")
+	})
+	if err == nil {
+		t.Fatal("expected the fatal error encountered mid-retry to be returned")
+	}
+	// 2 transient + 1 fatal: the fatal must short-circuit, not run out the cap.
+	if calls != 3 {
+		t.Errorf("expected 3 calls (2 transient + 1 fatal short-circuit), got %d", calls)
 	}
 }
 

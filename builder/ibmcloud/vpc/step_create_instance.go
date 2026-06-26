@@ -121,22 +121,10 @@ func (step *stepCreateInstance) Run(_ context.Context, state multistep.StateBag)
 		createInstanceOptions := vpcService.NewCreateInstanceOptions(
 			instancePrototypeModel,
 		)
-		var instanceData *vpcv1.Instance
-		err := client.retryTransient(state, "creating the instance", func() (*core.DetailedResponse, error) {
-			var resp *core.DetailedResponse
-			var e error
-			instanceData, resp, e = vpcService.CreateInstance(createInstanceOptions)
-			return resp, e
-		})
-		// End
-		if err != nil {
-			err := fmt.Errorf("[ERROR] Error creating the instance: %s", err)
-			state.Put("error", err)
-			ui.Error(err.Error())
-			// log.Fatalf(err.Error())
-			return multistep.ActionHalt
+		instanceData, action := createInstanceWithRetry(client, vpcService, createInstanceOptions, state)
+		if instanceData == nil {
+			return action
 		}
-		state.Put("instance_data", instanceData)
 		ui.Say("Instance successfully created!")
 		ui.Say(fmt.Sprintf("Instance's Name: %s", *instanceData.Name))
 		ui.Say(fmt.Sprintf("Instance's ID: %s", *instanceData.ID))
@@ -195,23 +183,10 @@ func (step *stepCreateInstance) Run(_ context.Context, state multistep.StateBag)
 		createInstanceOptions := vpcService.NewCreateInstanceOptions(
 			instancePrototypeModel,
 		)
-		var instanceData *vpcv1.Instance
-		err := client.retryTransient(state, "creating the instance", func() (*core.DetailedResponse, error) {
-			var resp *core.DetailedResponse
-			var e error
-			instanceData, resp, e = vpcService.CreateInstance(createInstanceOptions)
-			return resp, e
-		})
-		// End
-		if err != nil {
-			err := fmt.Errorf("[ERROR] Error creating the instance: %s", err)
-			state.Put("error", err)
-			ui.Error(err.Error())
-			// log.Fatalf(err.Error())
-			return multistep.ActionHalt
+		instanceData, action := createInstanceWithRetry(client, vpcService, createInstanceOptions, state)
+		if instanceData == nil {
+			return action
 		}
-
-		state.Put("instance_data", instanceData)
 
 		ui.Say("Instance successfully created!")
 		ui.Say(fmt.Sprintf("Instance's Name: %s", *instanceData.Name))
@@ -268,23 +243,10 @@ func (step *stepCreateInstance) Run(_ context.Context, state multistep.StateBag)
 		createInstanceOptions := vpcService.NewCreateInstanceOptions(
 			instancePrototypeModel,
 		)
-		var instanceData *vpcv1.Instance
-		err := client.retryTransient(state, "creating the instance", func() (*core.DetailedResponse, error) {
-			var resp *core.DetailedResponse
-			var e error
-			instanceData, resp, e = vpcService.CreateInstance(createInstanceOptions)
-			return resp, e
-		})
-		// End
-		if err != nil {
-			err := fmt.Errorf("[ERROR] Error creating the instance: %s", err)
-			state.Put("error", err)
-			ui.Error(err.Error())
-			// log.Fatalf(err.Error())
-			return multistep.ActionHalt
+		instanceData, action := createInstanceWithRetry(client, vpcService, createInstanceOptions, state)
+		if instanceData == nil {
+			return action
 		}
-
-		state.Put("instance_data", instanceData)
 
 		ui.Say("Instance successfully created with the provided boot volume!")
 		ui.Say(fmt.Sprintf("Instance's Name: %s", *instanceData.Name))
@@ -333,29 +295,39 @@ func (step *stepCreateInstance) Run(_ context.Context, state multistep.StateBag)
 		createInstanceOptions := vpcService.NewCreateInstanceOptions(
 			instancePrototypeModel,
 		)
-		var instanceData *vpcv1.Instance
-		err := client.retryTransient(state, "creating the instance", func() (*core.DetailedResponse, error) {
-			var resp *core.DetailedResponse
-			var e error
-			instanceData, resp, e = vpcService.CreateInstance(createInstanceOptions)
-			return resp, e
-		})
-		// End
-		if err != nil {
-			err := fmt.Errorf("[ERROR] Error creating the instance: %s", err)
-			state.Put("error", err)
-			ui.Error(err.Error())
-			// log.Fatalf(err.Error())
-			return multistep.ActionHalt
+		instanceData, action := createInstanceWithRetry(client, vpcService, createInstanceOptions, state)
+		if instanceData == nil {
+			return action
 		}
-
-		state.Put("instance_data", instanceData)
 
 		ui.Say("Instance successfully created with the provided boot snapshot!")
 		ui.Say(fmt.Sprintf("Instance's Name: %s", *instanceData.Name))
 		ui.Say(fmt.Sprintf("Instance's ID: %s", *instanceData.ID))
 	}
 	return multistep.ActionContinue
+}
+
+// createInstanceWithRetry issues the CreateInstance call with transient-error
+// retries, stores the result under "instance_data" on success, and on failure
+// records the error in the state bag and returns (nil, ActionHalt) so the caller
+// can halt the step. The four instance-prototype branches in Run share this.
+func createInstanceWithRetry(client *IBMCloudClient, vpcService *vpcv1.VpcV1, options *vpcv1.CreateInstanceOptions, state multistep.StateBag) (*vpcv1.Instance, multistep.StepAction) {
+	ui := state.Get("ui").(packer.Ui)
+	var instanceData *vpcv1.Instance
+	err := client.retryTransient(state, "creating the instance", func() (*core.DetailedResponse, error) {
+		var resp *core.DetailedResponse
+		var e error
+		instanceData, resp, e = vpcService.CreateInstance(options)
+		return resp, e
+	})
+	if err != nil {
+		err := fmt.Errorf("[ERROR] Error creating the instance: %s", err)
+		state.Put("error", err)
+		ui.Error(err.Error())
+		return nil, multistep.ActionHalt
+	}
+	state.Put("instance_data", instanceData)
+	return instanceData, multistep.ActionContinue
 }
 
 func (step *stepCreateInstance) Cleanup(state multistep.StateBag) {

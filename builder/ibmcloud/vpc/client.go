@@ -72,6 +72,15 @@ func classifyPollError(resp *core.DetailedResponse, err error, wrapped error) er
 	return wrapped
 }
 
+// effectivePollInterval resolves the wait between retries/polls, falling back to
+// defaultPollInterval when pollInterval is unset (its zero value is the test seam).
+func (client IBMCloudClient) effectivePollInterval() time.Duration {
+	if client.pollInterval <= 0 {
+		return defaultPollInterval
+	}
+	return client.pollInterval
+}
+
 // retryTransient runs a one-shot create/mutating VPC API call, retrying it when
 // it fails with a transient error (a 5xx/429 response or a network-level blip)
 // up to maxConsecutiveTransientPollFailures times before giving up. Fatal errors
@@ -80,16 +89,20 @@ func classifyPollError(resp *core.DetailedResponse, err error, wrapped error) er
 // with the poll loops so both paths treat the same errors the same way.
 //
 // op performs the API call and returns its DetailedResponse and error; the caller
-// captures the typed result (key, instance, ...) via closure. retryTransient
-// returns the underlying API error unchanged, so callers keep their existing
-// error wrapping and "error" state-bag handling.
+// captures the typed result (key, instance, ...) via closure. On a fatal error
+// retryTransient returns it unchanged; on retry exhaustion it wraps it with the
+// give-up context. Either way the caller's existing error wrapping and "error"
+// state-bag handling still apply.
+//
+// Note on non-idempotent calls (CreateInstance/CreateFloatingIP/...): a network
+// blip after the server already processed the request will be retried, which
+// could in principle create a duplicate. In practice these calls use fixed names
+// (config.VSIName, config.FloatingIPName, ...), so a genuine duplicate retry hits
+// a name conflict and fails fast as a fatal 4xx rather than orphaning resources.
 func (client IBMCloudClient) retryTransient(state multistep.StateBag, action string, op func() (*core.DetailedResponse, error)) error {
 	ui := state.Get("ui").(packer.Ui)
 
-	interval := client.pollInterval
-	if interval <= 0 {
-		interval = defaultPollInterval
-	}
+	interval := client.effectivePollInterval()
 
 	var err error
 	for attempt := 0; ; attempt++ {
@@ -102,8 +115,10 @@ func (client IBMCloudClient) retryTransient(state multistep.StateBag, action str
 			return err
 		}
 		if attempt >= maxConsecutiveTransientPollFailures {
-			log.Printf("giving up %s after %d consecutive transient errors: %s", action, attempt+1, err)
-			return err
+			// Fold the exhaustion into the returned error (mirroring the poll
+			// loop's give-up message) so the operator can tell a flaky/throttled
+			// failure apart from a fast-failed fatal 4xx in the build output.
+			return fmt.Errorf("giving up %s after %d consecutive transient errors: %w", action, attempt+1, err)
 		}
 		ui.Say(fmt.Sprintf("Transient error %s (%d/%d), retrying: %s",
 			action, attempt+1, maxConsecutiveTransientPollFailures, err))
@@ -172,10 +187,7 @@ func (client IBMCloudClient) pollUntil(
 	defer close(done)
 	result := make(chan error, 1)
 
-	interval := client.pollInterval
-	if interval <= 0 {
-		interval = defaultPollInterval
-	}
+	interval := client.effectivePollInterval()
 
 	go func() {
 		attempts := 0
